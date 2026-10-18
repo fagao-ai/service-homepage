@@ -453,6 +453,12 @@ struct PowerIn {
     confirm: String,
 }
 
+/// Accepts "confirm" ignoring case and surrounding spaces (misclick guard,
+/// not a security boundary; login is).
+fn confirm_ok(word: &str) -> bool {
+    word.trim().eq_ignore_ascii_case("confirm")
+}
+
 /// Power control for the host, gated behind login + typed confirmation.
 /// Uses systemctl (not `poweroff`) so it works through systemd; the spawned
 /// call is detached, the service will be stopped by the shutdown itself.
@@ -460,7 +466,8 @@ async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Respon
     // Defense in depth: middleware already requires login for /api/*, but
     // power ops re-check the session cookie here as well.
     let _ = &st;
-    if input.confirm != "confirm" {
+    // Case/space-insensitive: mobile keyboards often auto-capitalize.
+    if !confirm_ok(&input.confirm) {
         return (StatusCode::BAD_REQUEST, "confirmation mismatch").into_response();
     }
     let unit = match input.action.as_str() {
@@ -626,6 +633,15 @@ LISTEN 0 4096 [::]:22 [::]:* users((\"sshd\",pid=1,fd=3))\n";
         assert_eq!(service_port("http://host:9000/x"), Some(9000));
         assert_eq!(service_port("https://example.com"), None);
         assert_eq!(service_port("/local-path"), None);
+    }
+
+    #[test]
+    fn confirm_word_check() {
+        assert!(confirm_ok("confirm"));
+        assert!(confirm_ok("Confirm")); // mobile autocapitalize
+        assert!(confirm_ok("  CONFIRM "));
+        assert!(!confirm_ok("no"));
+        assert!(!confirm_ok(""));
     }
 
     #[test]
