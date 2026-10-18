@@ -46,7 +46,6 @@ struct AppState {
     attempts: Arc<Mutex<std::collections::HashMap<String, Attempts>>>,
     /// Cached liveness from the last web-port probe: port -> up.
     health: Arc<RwLock<std::collections::HashMap<u16, bool>>>,
-    last_probe: Arc<Mutex<Option<std::time::Instant>>>,
     /// Long-lived session token handed out after login.
     token: String,
     /// None disables auth entirely.
@@ -145,8 +144,18 @@ async fn login(
 }
 
 async fn auth(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    // Auth disabled when no password configured.
+    // No password configured: serve the site read-only. Mutations and power
+    // ops stay disabled so a missing env file can never expose shutdown.
     if st.password.is_none() {
+        let writable = *req.method() != axum::http::Method::GET;
+        let sensitive = req.uri().path() == "/api/power";
+        if writable || sensitive {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "read-only: set HOME_PASSWORD to enable edits and power ops",
+            )
+                .into_response();
+        }
         return next.run(req).await;
     }
     let path = req.uri().path().to_string();
@@ -174,10 +183,27 @@ async fn auth(State(st): State<AppState>, req: Request, next: Next) -> Response 
 fn persist(state: &AppState) {
     let list = state.services.read().unwrap().clone();
     if let Ok(json) = serde_json::to_string_pretty(&list) {
-        if let Err(e) = fs::write(&state.path, json) {
-            eprintln!("persist failed: {e}");
-        }
+        // Write to a temp file then rename so a crash/shutdown mid-write
+        // can never truncate the real file.
+        let tmp = state.path.with_extension("json.tmp");
+        let ok = fs::write(&tmp, json)
+            .and_then(|()| fs::rename(&tmp, &state.path))
+            .map_err(|e| eprintln!("persist failed: {e}"));
+        let _ = ok;
     }
+}
+
+/// Create a file with owner-only permissions (token material).
+fn write_secret(path: &PathBuf, content: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    use std::io::Write as _;
+    f.write_all(content.as_bytes())
 }
 
 fn new_id() -> String {
@@ -391,7 +417,6 @@ async fn ports(State(st): State<AppState>) -> Json<Vec<ListeningPort>> {
         st.health.write().unwrap().insert(port, up);
     }
     web.sort_by_key(|p| p.port);
-    *st.last_probe.lock().unwrap() = Some(std::time::Instant::now());
     Json(web)
 }
 
@@ -506,7 +531,9 @@ async fn main() -> anyhow::Result<()> {
                 let _ = f.read(&mut bytes);
             }
             let t = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-            let _ = fs::write(&key_path, &t);
+            if let Err(e) = write_secret(&key_path, &t) {
+                eprintln!("warning: could not persist session key: {e}");
+            }
             t
         });
     let password = std::env::var("HOME_PASSWORD")
@@ -521,7 +548,6 @@ async fn main() -> anyhow::Result<()> {
         path,
         attempts: Arc::new(Mutex::new(std::collections::HashMap::new())),
         health: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        last_probe: Arc::new(Mutex::new(None)),
         token,
         password,
         user,
