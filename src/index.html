@@ -85,6 +85,12 @@
   }
   .pw-btn:hover { color: var(--ink); }
   .pw-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
+  .perr { color: var(--danger); font-size: 12px; margin-top: 8px; min-height: 14px; }
+  .banner {
+    max-width: 780px; margin: 0 auto 16px; background: rgba(255,122,69,.12);
+    border: 1px solid rgba(255,122,69,.4); color: #ffb787; border-radius: 12px;
+    padding: 10px 14px; font-size: 13px;
+  }
   .note { margin-top: 26px; color: var(--dim); font-size: 11px; line-height: 1.8; border-top: 1px solid var(--edge); padding-top: 12px; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 </style>
@@ -106,6 +112,19 @@
     数据保存在服务器 /var/lib/homepage/services.json。
   </div>
 </div>
+
+<div class="banner" id="pwBanner" style="display:none"></div>
+
+<dialog id="pwDlg">
+  <h2 id="pwTitle">确认操作？</h2>
+  <label>请输入 confirm 执行（其他任意内容取消）</label>
+  <input id="pwInput" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="confirm">
+  <p class="perr" id="pwMsg"></p>
+  <div class="btns">
+    <button id="pwCancel">取消</button>
+    <button class="ok" id="pwOk">确定</button>
+  </div>
+</dialog>
 
 <dialog id="dlg">
   <h2 id="dlgTitle">添加服务</h2>
@@ -258,24 +277,44 @@ async function loadPorts() {
 portSel.onchange = () => { if (portSel.value) document.getElementById('fUrl').value = portSel.value; };
 document.getElementById('refreshPorts').onclick = loadPorts;
 
-// ---- power actions ----
-async function powerAction(action, label) {
-  const word = prompt(`确认${label} home-host？\n请输入 confirm 执行（其他任意内容取消）`);
-  if (word === null) return;
+// ---- power actions (in-page dialog: webview prompt() is unreliable) ----
+const pwDlg = document.getElementById('pwDlg');
+const pwInput = document.getElementById('pwInput');
+const pwMsg = document.getElementById('pwMsg');
+let pwAction = null, pwLabel = '';
+
+function openPwDlg(action, label) {
+  pwAction = action; pwLabel = label;
+  document.getElementById('pwTitle').textContent = `确认${label} home-host？`;
+  pwInput.value = ''; pwMsg.textContent = '';
+  pwDlg.showModal();
+  setTimeout(() => pwInput.focus(), 50);
+}
+document.getElementById('rebootBtn').onclick = () => openPwDlg('reboot', '重启');
+document.getElementById('shutdownBtn').onclick = () => openPwDlg('shutdown', '关机');
+document.getElementById('pwCancel').onclick = () => pwDlg.close();
+
+async function powerAction(action, label, word) {
   const res = await fetch('/api/power', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, confirm: word.trim() }),
+    body: JSON.stringify({ action, confirm: word }),
   });
-  if (res.status === 400) { alert('已取消（确认词不匹配）'); return; }
+  if (res.status === 400) { pwMsg.textContent = '确认词不匹配，已取消'; return true; }
   if (res.ok) {
-    alert(`${label}指令已发出，机器将在几秒内执行。`);
-    return;
+    pwDlg.close();
+    document.getElementById('pwBanner').textContent = `${label}指令已发出，机器将在几秒内执行。`;
+    document.getElementById('pwBanner').style.display = 'block';
+    return true;
   }
-  alert(`${label}失败: HTTP ` + res.status);
+  pwMsg.textContent = `${label}失败: HTTP ` + res.status;
+  return true;
 }
-document.getElementById('rebootBtn').onclick = () => powerAction('reboot', '重启');
-document.getElementById('shutdownBtn').onclick = () => powerAction('shutdown', '关机');
+document.getElementById('pwOk').onclick = async () => {
+  document.getElementById('pwOk').disabled = true;
+  await powerAction(pwAction, pwLabel, pwInput.value.trim());
+  document.getElementById('pwOk').disabled = false;
+};
 
 loadPorts();
 load();
