@@ -12,7 +12,8 @@ Restart=always
 RestartSec=3
 User=dev
 Group=dev
-NoNewPrivileges=true
+# NOTE: NoNewPrivileges must stay off here: it would block the
+# setuid sudo used by /api/power (scoped by /etc/sudoers.d/homepage-power).
 PrivateTmp=true
 
 [Install]

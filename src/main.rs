@@ -497,7 +497,7 @@ async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Respon
         .arg(unit)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -510,15 +510,22 @@ async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Respon
         }
     };
     // systemctl start <target> returns quickly; shutdown proceeds async.
-    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-        Ok(Ok(status)) if status.success() => {
+    // Collect stderr so failures are diagnosable from the response + log.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await;
+    match outcome {
+        Ok(Ok(out)) if out.status.success() => {
             (StatusCode::ACCEPTED, format!("{unit} requested")).into_response()
         }
-        Ok(Ok(_)) | Ok(Err(_)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "systemctl failed; check permissions",
-        )
-            .into_response(),
+        Ok(Ok(out)) => {
+            let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            eprintln!("power failed: exit {:?} stderr: {detail}", out.status);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("systemctl failed: {detail}"),
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         // Timed out but likely still working; treat as accepted.
         Err(_) => (StatusCode::ACCEPTED, format!("{unit} requested")).into_response(),
     }
