@@ -1,0 +1,19 @@
+[Unit]
+Description=Service homepage (editable navigation page)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/homepage
+Environment=HOME_ADDR=127.0.0.1:8090
+Environment=HOME_DATA=/var/lib/homepage/services.json
+Restart=always
+RestartSec=3
+User=dev
+Group=dev
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

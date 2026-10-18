@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · home-host</title>
+<style>
+  :root { --bg:#0b0f14; --card:#121821; --edge:#1e2a38; --ink:#dbe6f0; --dim:#66788c; --accent:#36cfc9; --danger:#ff7875; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: radial-gradient(900px 400px at 80% -10%, rgba(54,207,201,.08), transparent 60%), var(--bg);
+    color: var(--ink); min-height: 100vh; display: grid; place-items: center; padding: 20px;
+  }
+  .box {
+    width: min(92vw, 340px); background: var(--card); border: 1px solid var(--edge);
+    border-radius: 18px; padding: 30px 26px; animation: rise .45s ease-out both;
+  }
+  h1 { font-size: 19px; margin-bottom: 4px; }
+  h1 b { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 22px; }
+  input {
+    width: 100%; background: var(--bg); border: 1px solid var(--edge); color: var(--ink);
+    border-radius: 11px; padding: 12px 13px; font-size: 15px;
+  }
+  button {
+    width: 100%; margin-top: 14px; padding: 12px; border: none; border-radius: 11px;
+    background: var(--accent); color: #06282a; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  button:disabled { opacity: .6; }
+  .err { color: var(--danger); font-size: 12px; margin-top: 10px; min-height: 15px; }
+  @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<form class="box" id="f">
+  <h1>home<b>·</b>gpu 服务导航</h1>
+  <p class="sub">请输入账号密码</p>
+  <input type="text" id="user" placeholder="用户名" autofocus autocomplete="username">
+  <input type="password" id="pw" placeholder="密码" style="margin-top:10px" autocomplete="current-password">
+  <button type="submit" id="btn">登 录</button>
+  <p class="err" id="err"></p>
+</form>
+<script>
+const f = document.getElementById('f'), user = document.getElementById('user'), pw = document.getElementById('pw'),
+      btn = document.getElementById('btn'), err = document.getElementById('err');
+f.onsubmit = async (e) => {
+  e.preventDefault();
+  btn.disabled = true; err.textContent = '';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: user.value.trim(), password: pw.value }),
+    });
+    if (res.ok) { location.href = '/'; return; }
+    err.textContent = res.status === 401 ? '密码错误' : '登录失败 (' + res.status + ')';
+  } catch { err.textContent = '网络错误'; }
+  btn.disabled = false;
+};
+</script>
+</body>
+</html>

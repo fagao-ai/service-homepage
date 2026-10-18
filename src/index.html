@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>home-host 服务导航</title>
+<style>
+  :root {
+    --bg: #0b0f14; --card: #121821; --edge: #1e2a38;
+    --ink: #dbe6f0; --dim: #66788c; --accent: #36cfc9; --danger: #ff7875;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: radial-gradient(900px 400px at 80% -10%, rgba(54,207,201,.08), transparent 60%), var(--bg);
+    color: var(--ink); min-height: 100vh; padding: 36px 18px;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; }
+  h1 { font-size: 21px; letter-spacing: .5px; }
+  h1 b { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 12px; margin: 6px 0 22px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); gap: 13px; }
+  .card {
+    position: relative; background: var(--card); border: 1px solid var(--edge);
+    border-radius: 14px; padding: 16px; animation: rise .4s ease-out both;
+  }
+  .card a.main { display: block; text-decoration: none; color: var(--ink); }
+  .name { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  .icon { margin-right: 6px; }
+  .url { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); word-break: break-all; }
+  .desc { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  .ops { position: absolute; top: 8px; right: 8px; display: none; gap: 4px; }
+  .card:hover .ops, body.editmode .ops { display: flex; }
+  .ops button {
+    border: 1px solid var(--edge); background: var(--bg); color: var(--dim);
+    border-radius: 8px; font-size: 12px; padding: 2px 8px; cursor: pointer;
+  }
+  .ops button.del:hover { color: var(--danger); border-color: var(--danger); }
+  .addbtn {
+    border: 1px dashed var(--edge); background: transparent; color: var(--dim);
+    border-radius: 14px; min-height: 96px; font-size: 14px; cursor: pointer;
+    display: grid; place-items: center; width: 100%;
+  }
+  .addbtn:hover { color: var(--accent); border-color: var(--accent); }
+  .edit-toggle { border: 1px solid var(--edge); background: var(--card); color: var(--dim); border-radius: 10px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+  .edit-toggle.on { color: var(--accent); border-color: var(--accent); }
+  dialog {
+    background: var(--card); color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 16px; padding: 22px; width: min(92vw, 380px);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h2 { font-size: 16px; margin-bottom: 14px; }
+  dialog label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  dialog input {
+    width: 100%; background: var(--bg); border: 1px solid var(--edge); color: var(--ink);
+    border-radius: 10px; padding: 9px 11px; font-size: 14px;
+  }
+  .row { display: flex; gap: 10px; }
+  .row .f-icon { width: 74px; }
+  .btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .btns button { border-radius: 10px; padding: 8px 16px; font-size: 13px; cursor: pointer; border: 1px solid var(--edge); background: var(--bg); color: var(--dim); }
+  .btns .ok { background: var(--accent); border-color: var(--accent); color: #06282a; font-weight: 700; }
+  .palette { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .palette button {
+    font-size: 18px; width: 36px; height: 36px; border-radius: 9px; cursor: pointer;
+    background: var(--bg); border: 1px solid var(--edge);
+  }
+  .palette button:hover, .palette button.sel { border-color: var(--accent); }
+  select {
+    width: 100%; background: var(--bg); border: 1px solid var(--edge); color: var(--ink);
+    border-radius: 10px; padding: 9px 11px; font-size: 13px;
+  }
+  .portlabel { display: flex; align-items: center; gap: 8px; }
+  .mini { border: 1px solid var(--edge); background: var(--bg); color: var(--dim); border-radius: 7px; font-size: 11px; padding: 1px 8px; cursor: pointer; }
+  .note { margin-top: 26px; color: var(--dim); font-size: 11px; line-height: 1.8; border-top: 1px solid var(--edge); padding-top: 12px; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>home<b>·</b>gpu 服务导航</h1>
+    <button class="edit-toggle" id="editToggle">编辑</button>
+  </header>
+  <p class="sub">点卡片直达 · 手机上点“编辑”可增删服务</p>
+  <div class="grid" id="grid"></div>
+  <div class="note">
+    URL 填法：端口（8080）、端口+路径（5200/docs）、完整链接（http://…）或本机路径（/x）均可。<br>
+    数据保存在服务器 /var/lib/homepage/services.json。
+  </div>
+</div>
+
+<dialog id="dlg">
+  <h2 id="dlgTitle">添加服务</h2>
+  <div class="row">
+    <div class="f-icon"><label>图标</label><input id="fIcon" placeholder="🖥" maxlength="4"></div>
+    <div style="flex:1"><label>名称 *</label><input id="fName" placeholder="GPU Monitor"></div>
+  </div>
+  <div class="palette" id="palette"></div>
+  <label>URL / 端口 *</label><input id="fUrl" placeholder="8080 或 5200/docs 或 http://…">
+  <label class="portlabel">本机 Web 服务端口 <button type="button" id="refreshPorts" class="mini">刷新</button></label>
+  <select id="portSel"><option value="">（加载中…）</option></select>
+  <label>备注</label><input id="fDesc" placeholder="可选">
+  <div class="btns">
+    <button id="cancelBtn">取消</button>
+    <button class="ok" id="saveBtn">保存</button>
+  </div>
+</dialog>
+
+<script>
+// Any 401 from the API (expired/absent session) bounces to the login page.
+const _fetch = window.fetch.bind(window);
+window.fetch = async (url, opts) => {
+  const res = await _fetch(url, opts);
+  if (res.status === 401 && typeof url === 'string' && url.startsWith('/api/') && url !== '/api/login') {
+    location.href = '/login';
+  }
+  return res;
+};
+const grid = document.getElementById('grid');
+const dlg = document.getElementById('dlg');
+const HOST = location.hostname;
+let editingId = null;   // null = add, string = edit id
+let services = [];
+
+function resolveUrl(u) {
+  if (/^https?:\/\//.test(u)) return u;
+  if (u.startsWith('/')) return location.origin + u;
+  return `http://${HOST}:${u}`;
+}
+
+async function load() {
+  services = await (await fetch('/api/services')).json();
+  render();
+}
+
+function render() {
+  grid.innerHTML = '';
+  services.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML = `
+      <a class="main" href="${resolveUrl(s.url)}">
+        <div class="name"><span class="icon">${s.icon || '🔗'}</span>${esc(s.name)}</div>
+        <div class="url">${esc(s.url)}</div>
+        ${s.desc ? `<div class="desc">${esc(s.desc)}</div>` : ''}
+      </a>
+      <div class="ops">
+        <button data-edit="${s.id}">改</button>
+        <button class="del" data-del="${s.id}">删</button>
+      </div>`;
+    grid.appendChild(el);
+  });
+  const add = document.createElement('button');
+  add.className = 'addbtn';
+  add.textContent = '＋ 添加服务';
+  add.onclick = () => openDlg(null);
+  grid.appendChild(add);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function openDlg(svc) {
+  editingId = svc ? svc.id : null;
+  document.getElementById('dlgTitle').textContent = svc ? '编辑服务' : '添加服务';
+  document.getElementById('fIcon').value = svc ? svc.icon : '';
+  document.getElementById('fName').value = svc ? svc.name : '';
+  document.getElementById('fUrl').value = svc ? svc.url : '';
+  document.getElementById('fDesc').value = svc ? svc.desc : '';
+  dlg.showModal();
+}
+
+grid.addEventListener('click', async (e) => {
+  const del = e.target.dataset?.del;
+  const edit = e.target.dataset?.edit;
+  if (del) {
+    if (!confirm('删除该服务？')) return;
+    await fetch(`/api/services/${del}`, { method: 'DELETE' });
+    load();
+  } else if (edit) {
+    openDlg(services.find(s => s.id === edit));
+  }
+});
+
+document.getElementById('editToggle').onclick = (e) => {
+  document.body.classList.toggle('editmode');
+  e.target.classList.toggle('on');
+  e.target.textContent = document.body.classList.contains('editmode') ? '完成' : '编辑';
+};
+
+document.getElementById('cancelBtn').onclick = () => dlg.close();
+
+document.getElementById('saveBtn').onclick = async () => {
+  const body = {
+    icon: document.getElementById('fIcon').value.trim(),
+    name: document.getElementById('fName').value.trim(),
+    url: document.getElementById('fUrl').value.trim(),
+    desc: document.getElementById('fDesc').value.trim(),
+  };
+  if (!body.name || !body.url) { alert('名称和 URL 必填'); return; }
+  if (editingId) {
+    await fetch(`/api/services/${editingId}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  } else {
+    await fetch('/api/services', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  }
+  dlg.close();
+  load();
+};
+
+// ---- icon candidates ----
+const EMOJIS = ['🖥','🚀','💻','🐦','🌐','📊','📈','🔥','⚙️','🗄','🗂','📁','🔧','🧩','🤖','🧠','🔍','🔔','📡','🛰','🎛','🎮','🎬','🎵','📷','✉️','💬','🛠','🧪','🔗','🔒','🐳','☁️','⚡'];
+const palette = document.getElementById('palette');
+EMOJIS.forEach(em => {
+  const b = document.createElement('button');
+  b.type = 'button'; b.textContent = em;
+  b.onclick = () => {
+    document.getElementById('fIcon').value = em;
+    palette.querySelectorAll('button').forEach(x => x.classList.remove('sel'));
+    b.classList.add('sel');
+  };
+  palette.appendChild(b);
+});
+
+// ---- detected listening ports ----
+const portSel = document.getElementById('portSel');
+async function loadPorts() {
+  portSel.innerHTML = '<option value="">— 选择端口填入 URL —</option>';
+  let ports = [];
+  try { ports = await (await fetch('/api/ports')).json(); } catch { }
+  ports.forEach(p => {
+    const o = document.createElement('option');
+    o.value = String(p.port);
+    o.textContent = p.process ? `:${p.port}  ${p.process} (pid ${p.pid ?? '?'})` : `:${p.port}`;
+    portSel.appendChild(o);
+  });
+}
+portSel.onchange = () => { if (portSel.value) document.getElementById('fUrl').value = portSel.value; };
+document.getElementById('refreshPorts').onclick = loadPorts;
+
+loadPorts();
+load();
+</script>
+</body>
+</html>
