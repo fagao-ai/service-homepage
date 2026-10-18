@@ -453,10 +453,24 @@ struct PowerIn {
     confirm: String,
 }
 
-/// Accepts "confirm" ignoring case and surrounding spaces (misclick guard,
-/// not a security boundary; login is).
+/// Accepts "confirm" robustly against mobile IME quirks (misclick guard, not
+/// a security boundary; login is): normalizes full-width ASCII to half-width,
+/// keeps only alphanumerics (drops spaces/zero-width/autocorrect dots),
+/// lowercases everything.
+fn normalize_confirm(word: &str) -> String {
+    word.chars()
+        .map(|c| match c {
+            // Fullwidth ASCII variants (U+FF01..U+FF5E) -> ASCII.
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            _ => c,
+        })
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 fn confirm_ok(word: &str) -> bool {
-    word.trim().eq_ignore_ascii_case("confirm")
+    normalize_confirm(word) == "confirm"
 }
 
 /// Power control for the host, gated behind login + typed confirmation.
@@ -468,6 +482,8 @@ async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Respon
     let _ = &st;
     // Case/space-insensitive: mobile keyboards often auto-capitalize.
     if !confirm_ok(&input.confirm) {
+        // Log raw input so future mismatch reports can be diagnosed.
+        eprintln!("power confirm mismatch, got: {:?}", input.confirm);
         return (StatusCode::BAD_REQUEST, "confirmation mismatch").into_response();
     }
     let unit = match input.action.as_str() {
@@ -640,8 +656,13 @@ LISTEN 0 4096 [::]:22 [::]:* users((\"sshd\",pid=1,fd=3))\n";
         assert!(confirm_ok("confirm"));
         assert!(confirm_ok("Confirm")); // mobile autocapitalize
         assert!(confirm_ok("  CONFIRM "));
+        assert!(confirm_ok("ｃｏｎｆｉｒｍ")); // fullwidth IME input
+        assert!(confirm_ok("Ｃｏｎｆｉｒｍ")); // fullwidth + capitalize
+        assert!(confirm_ok("confirm.")); // autocorrect trailing dot
+        assert!(confirm_ok("c​onfirm")); // zero-width char
         assert!(!confirm_ok("no"));
         assert!(!confirm_ok(""));
+        assert!(!confirm_ok("コｎｆｉｒｍx"));
     }
 
     #[test]
