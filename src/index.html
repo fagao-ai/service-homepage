@@ -78,6 +78,13 @@
   }
   .portlabel { display: flex; align-items: center; gap: 8px; }
   .mini { border: 1px solid var(--edge); background: var(--bg); color: var(--dim); border-radius: 7px; font-size: 11px; padding: 1px 8px; cursor: pointer; }
+  .power { display: flex; gap: 10px; justify-content: flex-end; margin-top: 22px; }
+  .pw-btn {
+    border: 1px solid var(--edge); background: var(--card); color: var(--dim);
+    border-radius: 11px; padding: 9px 18px; font-size: 13px; cursor: pointer;
+  }
+  .pw-btn:hover { color: var(--ink); }
+  .pw-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
   .note { margin-top: 26px; color: var(--dim); font-size: 11px; line-height: 1.8; border-top: 1px solid var(--edge); padding-top: 12px; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 </style>
@@ -90,6 +97,10 @@
   </header>
   <p class="sub">点卡片直达 · 手机上点“编辑”可增删服务</p>
   <div class="grid" id="grid"></div>
+  <div class="power">
+    <button class="pw-btn" id="rebootBtn">↻ 重启</button>
+    <button class="pw-btn danger" id="shutdownBtn">⏻ 关机</button>
+  </div>
   <div class="note">
     URL 填法：端口（8080）、端口+路径（5200/docs）、完整链接（http://…）或本机路径（/x）均可。<br>
     数据保存在服务器 /var/lib/homepage/services.json。
@@ -246,6 +257,25 @@ async function loadPorts() {
 }
 portSel.onchange = () => { if (portSel.value) document.getElementById('fUrl').value = portSel.value; };
 document.getElementById('refreshPorts').onclick = loadPorts;
+
+// ---- power actions ----
+async function powerAction(action, label) {
+  const word = prompt(`确认${label} home-host？\n请输入 confirm 执行（其他任意内容取消）`);
+  if (word === null) return;
+  const res = await fetch('/api/power', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, confirm: word.trim() }),
+  });
+  if (res.status === 400) { alert('已取消（确认词不匹配）'); return; }
+  if (res.ok) {
+    alert(`${label}指令已发出，机器将在几秒内执行。`);
+    return;
+  }
+  alert(`${label}失败: HTTP ` + res.status);
+}
+document.getElementById('rebootBtn').onclick = () => powerAction('reboot', '重启');
+document.getElementById('shutdownBtn').onclick = () => powerAction('shutdown', '关机');
 
 loadPorts();
 load();

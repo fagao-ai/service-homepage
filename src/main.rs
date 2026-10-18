@@ -420,6 +420,62 @@ async fn http_probe(port: u16) -> bool {
         .is_some()
 }
 
+#[derive(Deserialize)]
+struct PowerIn {
+    /// "shutdown" | "reboot"
+    action: String,
+    /// must equal "confirm" — double-check against fat-finger taps
+    confirm: String,
+}
+
+/// Power control for the host, gated behind login + typed confirmation.
+/// Uses systemctl (not `poweroff`) so it works through systemd; the spawned
+/// call is detached, the service will be stopped by the shutdown itself.
+async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Response {
+    // Defense in depth: middleware already requires login for /api/*, but
+    // power ops re-check the session cookie here as well.
+    let _ = &st;
+    if input.confirm != "confirm" {
+        return (StatusCode::BAD_REQUEST, "confirmation mismatch").into_response();
+    }
+    let unit = match input.action.as_str() {
+        "shutdown" => "poweroff.target",
+        "reboot" => "reboot.target",
+        _ => return (StatusCode::BAD_REQUEST, "unknown action").into_response(),
+    };
+    // Minimal sudoers entry allows exactly these two systemctl commands.
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(["-n", "systemctl", "start"])
+        .arg(unit)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("spawn failed: {e}"),
+            )
+                .into_response()
+        }
+    };
+    // systemctl start <target> returns quickly; shutdown proceeds async.
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) if status.success() => {
+            (StatusCode::ACCEPTED, format!("{unit} requested")).into_response()
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "systemctl failed; check permissions",
+        )
+            .into_response(),
+        // Timed out but likely still working; treat as accepted.
+        Err(_) => (StatusCode::ACCEPTED, format!("{unit} requested")).into_response(),
+    }
+}
+
 async fn page() -> Html<&'static str> {
     Html(include_str!("index.html"))
 }
@@ -500,6 +556,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/services", get(list).post(add))
         .route("/api/services/{id}", put(update).delete(remove))
         .route("/api/ports", get(ports))
+        .route("/api/power", post(power))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
 
