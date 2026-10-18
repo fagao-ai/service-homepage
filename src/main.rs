@@ -7,7 +7,8 @@ use axum::{routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Service {
@@ -31,10 +32,21 @@ struct ServiceIn {
     desc: String,
 }
 
+/// Per-IP login throttle: 5 consecutive failures -> 60s lockout.
+#[derive(Default)]
+struct Attempts {
+    fails: u32,
+    blocked_until: Option<std::time::Instant>,
+}
+
 #[derive(Clone)]
 struct AppState {
     services: Arc<RwLock<Vec<Service>>>,
     path: PathBuf,
+    attempts: Arc<Mutex<std::collections::HashMap<String, Attempts>>>,
+    /// Cached liveness from the last web-port probe: port -> up.
+    health: Arc<RwLock<std::collections::HashMap<u16, bool>>>,
+    last_probe: Arc<Mutex<Option<std::time::Instant>>>,
     /// Long-lived session token handed out after login.
     token: String,
     /// None disables auth entirely.
@@ -64,17 +76,67 @@ struct LoginIn {
     password: String,
 }
 
+fn client_ip(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 async fn login(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(input): Json<LoginIn>,
 ) -> Response {
-    let ok = st.password.as_deref().is_some_and(|p| {
-        input.user == st.user && check_password(&input.password, p)
-    });
+    let ip = client_ip(&headers);
+    // Lockout check before validating credentials.
+    {
+        let map = st.attempts.lock().unwrap();
+        if let Some(a) = map.get(&ip) {
+            if let Some(until) = a.blocked_until {
+                if std::time::Instant::now() < until {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "too many failed attempts, wait a minute",
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let ok = st
+        .password
+        .as_deref()
+        .is_some_and(|p| input.user == st.user && check_password(&input.password, p));
+    {
+        let mut map = st.attempts.lock().unwrap();
+        if ok {
+            map.remove(&ip);
+        } else {
+            let a = map.entry(ip).or_default();
+            a.fails += 1;
+            if a.fails >= 5 {
+                a.blocked_until = Some(std::time::Instant::now() + Duration::from_secs(60));
+                a.fails = 0;
+            }
+        }
+    }
     if !ok {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let value = format!("hp_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000", st.token);
+    let value = format!(
+        "hp_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000",
+        st.token
+    );
     (
         [(header::SET_COOKIE, HeaderValue::from_str(&value).unwrap())],
         StatusCode::NO_CONTENT,
@@ -126,11 +188,53 @@ fn new_id() -> String {
     format!("{nanos:x}")
 }
 
-async fn list(State(st): State<AppState>) -> Json<Vec<Service>> {
-    Json(st.services.read().unwrap().clone())
+/// Extract the local port from a service URL for liveness matching.
+fn service_port(url: &str) -> Option<u16> {
+    let rest = url.trim();
+    let candidate = if let Some(r) = rest.strip_prefix("http://") {
+        r
+    } else if rest.starts_with("https://") {
+        return None; // remote URL, unknown
+    } else {
+        rest
+    };
+    // "8080", "8080/path", "host:8080/path"
+    let token = candidate.split('/').next().unwrap_or("");
+    let port_str = token.rsplit(':').next().unwrap_or("");
+    if port_str.is_empty() || !token.contains(':') && port_str.parse::<u16>().is_err() {
+        // bare path like "/x"
+        return None;
+    }
+    port_str.parse().ok()
 }
 
-async fn add(State(st): State<AppState>, Json(input): Json<ServiceIn>) -> (StatusCode, Json<Service>) {
+#[derive(Serialize)]
+struct ServiceOut {
+    #[serde(flatten)]
+    service: Service,
+    /// True/false: probed state; null: unknown/not yet probed.
+    up: Option<bool>,
+}
+
+async fn list(State(st): State<AppState>) -> Json<Vec<ServiceOut>> {
+    let health = st.health.read().unwrap().clone();
+    let out = st
+        .services
+        .read()
+        .unwrap()
+        .iter()
+        .map(|s| ServiceOut {
+            up: service_port(&s.url).and_then(|p| health.get(&p).copied()),
+            service: s.clone(),
+        })
+        .collect();
+    Json(out)
+}
+
+async fn add(
+    State(st): State<AppState>,
+    Json(input): Json<ServiceIn>,
+) -> (StatusCode, Json<Service>) {
     let svc = Service {
         id: new_id(),
         name: input.name,
@@ -178,7 +282,7 @@ async fn remove(State(st): State<AppState>, AxPath(id): AxPath<String>) -> Statu
 /// easytier rpc/metrics); never valid homepage entries.
 const KNOWN_INFRA: [u16; 3] = [2019, 11010, 15888];
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ListeningPort {
     port: u16,
     addr: String,
@@ -188,17 +292,9 @@ struct ListeningPort {
 
 /// Enumerate listening TCP sockets via `ss -tlnp`. Owned processes expose
 /// their names; other users' processes only show the port (no privilege).
-async fn ports() -> Json<Vec<ListeningPort>> {
-    let out = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("ss")
-            .args(["-tlnp"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
-
+/// Parse `ss -tlnp` output into candidate listener entries, applying port and
+/// process-name filters. Pure so unit tests can feed fixture text.
+fn parse_ss_listeners(out: &str) -> Vec<ListeningPort> {
     let mut seen = std::collections::BTreeSet::new();
     let mut list = Vec::new();
     for line in out.lines().skip(1) {
@@ -213,7 +309,7 @@ async fn ports() -> Json<Vec<ListeningPort>> {
         };
         // Noise filters: privileged/system ports and the ephemeral range
         // (vLLM workers etc. bind random ports there).
-        if port < 1024 || port >= 32768 || KNOWN_INFRA.contains(&port) || !seen.insert(port) {
+        if !(1024..32768).contains(&port) || KNOWN_INFRA.contains(&port) || !seen.insert(port) {
             continue;
         }
         let (process, pid) = cols
@@ -235,7 +331,19 @@ async fn ports() -> Json<Vec<ListeningPort>> {
         // Hide internal/agent/system processes; they are never useful links.
         let hidden = process.as_deref().is_some_and(|p| {
             let lp = p.to_lowercase();
-            lp.contains("worker") || lp.contains("::") || matches!(lp.as_str(), "codex" | "sshd" | "systemd-resolved" | "snapd" | "systemd" | "caddy" | "easytier-core" | "easytier-cli")
+            lp.contains("worker")
+                || lp.contains("::")
+                || matches!(
+                    lp.as_str(),
+                    "codex"
+                        | "sshd"
+                        | "systemd-resolved"
+                        | "snapd"
+                        | "systemd"
+                        | "caddy"
+                        | "easytier-core"
+                        | "easytier-cli"
+                )
         });
         if hidden {
             continue;
@@ -247,21 +355,43 @@ async fn ports() -> Json<Vec<ListeningPort>> {
             pid,
         });
     }
+    list
+}
+
+async fn ports(State(st): State<AppState>) -> Json<Vec<ListeningPort>> {
+    let out = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("ss")
+            .args(["-tlnp"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let list = parse_ss_listeners(&out);
     // Keep only ports that actually speak HTTP: send a minimal request and
     // require an "HTTP/" response. Raw RPC/queue listeners are dropped.
     let mut set = tokio::task::JoinSet::new();
-    for item in list {
-        set.spawn(async move {
-            http_probe(item.port).await.then_some(item)
-        });
+    for item in list.iter().cloned() {
+        set.spawn(async move { http_probe(item.port).await.then_some(item) });
     }
-    let mut web: Vec<ListeningPort> = set
-        .join_all()
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+    let mut web: Vec<ListeningPort> = Vec::new();
+    let mut probe_results = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(item)) = res {
+            probe_results.push((item.port, true));
+            web.push(item);
+        }
+    }
+    // Every port we probed (web or not) records its liveness.
+    let probed: Vec<u16> = list.iter().map(|p| p.port).collect();
+    for port in probed {
+        let up = probe_results.iter().any(|(p, _)| *p == port);
+        probe_results.retain(|(p, _)| *p != port);
+        st.health.write().unwrap().insert(port, up);
+    }
     web.sort_by_key(|p| p.port);
+    *st.last_probe.lock().unwrap() = Some(std::time::Instant::now());
     Json(web)
 }
 
@@ -269,7 +399,9 @@ async fn ports() -> Json<Vec<ListeningPort>> {
 async fn http_probe(port: u16) -> bool {
     let probe = async {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
         s.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
             .ok()?;
@@ -294,7 +426,8 @@ async fn page() -> Html<&'static str> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let data = std::env::var("HOME_DATA").unwrap_or_else(|_| "/var/lib/homepage/services.json".into());
+    let data =
+        std::env::var("HOME_DATA").unwrap_or_else(|_| "/var/lib/homepage/services.json".into());
     let addr = std::env::var("HOME_ADDR").unwrap_or_else(|_| "127.0.0.1:8090".into());
     let path = PathBuf::from(&data);
     if let Some(dir) = path.parent() {
@@ -316,26 +449,49 @@ async fn main() -> anyhow::Result<()> {
                 use std::io::Read as _;
                 let _ = f.read(&mut bytes);
             }
-            let t = bytes
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
+            let t = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
             let _ = fs::write(&key_path, &t);
             t
         });
-    let password = std::env::var("HOME_PASSWORD").ok().filter(|p| !p.is_empty());
-    let user =
-        std::env::var("HOME_USER").unwrap_or_else(|_| "admin".to_string());
+    let password = std::env::var("HOME_PASSWORD")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let user = std::env::var("HOME_USER").unwrap_or_else(|_| "admin".to_string());
     if password.is_none() {
         eprintln!("warning: HOME_PASSWORD not set, authentication is DISABLED");
     }
     let state = AppState {
         services: Arc::new(RwLock::new(services)),
         path,
+        attempts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        health: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        last_probe: Arc::new(Mutex::new(None)),
         token,
         password,
         user,
     };
+
+    // Periodic liveness refresh for listed services (every 30s).
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let services = st.services.read().unwrap().clone();
+                let ports: Vec<u16> = services
+                    .iter()
+                    .filter_map(|s| service_port(&s.url))
+                    .collect();
+                let mut set = tokio::task::JoinSet::new();
+                for p in ports {
+                    set.spawn(async move { (p, http_probe(p).await) });
+                }
+                while let Some(Ok((port, up))) = set.join_next().await {
+                    st.health.write().unwrap().insert(port, up);
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(page))
@@ -355,4 +511,44 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SS_FIXTURE: &str = "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\n\
+LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:* users((\"gpu-monitor\",pid=100,fd=19))\n\
+LISTEN 0 4096 127.0.0.1:53 0.0.0.0:*\n\
+LISTEN 0 4096 0.0.0.0:15888 0.0.0.0:*\n\
+LISTEN 0 1024 0.0.0.0:40000 0.0.0.0:* users((\"VLLM::Worker_PP\",pid=2,fd=1))\n\
+LISTEN 0 4096 0.0.0.0:3080 0.0.0.0:* users((\"codeg-server\",pid=7,fd=24))\n\
+LISTEN 0 4096 0.0.0.0:3080 0.0.0.0:* users((\"codeg-server\",pid=7,fd=25))\n\
+LISTEN 0 4096 [::]:22 [::]:* users((\"sshd\",pid=1,fd=3))\n";
+
+    #[test]
+    fn parse_ss_filters_noise_and_dedups() {
+        let list = parse_ss_listeners(SS_FIXTURE);
+        let ports: Vec<u16> = list.iter().map(|p| p.port).collect();
+        // 8080 + 3080 kept; 53(<1024), 15888(infra), 40000(ephemeral+worker), 22(sshd) gone; dup 3080 collapsed.
+        assert_eq!(ports, vec![8080, 3080]);
+        assert_eq!(list[0].process.as_deref(), Some("gpu-monitor"));
+        assert_eq!(list[0].pid, Some(100));
+    }
+
+    #[test]
+    fn service_port_parsing() {
+        assert_eq!(service_port("8080"), Some(8080));
+        assert_eq!(service_port("5200/docs"), Some(5200));
+        assert_eq!(service_port("http://host:9000/x"), Some(9000));
+        assert_eq!(service_port("https://example.com"), None);
+        assert_eq!(service_port("/local-path"), None);
+    }
+
+    #[test]
+    fn password_check() {
+        assert!(check_password("abc123", "abc123"));
+        assert!(!check_password("abc124", "abc123"));
+        assert!(!check_password("abc", "abc123"));
+    }
 }
