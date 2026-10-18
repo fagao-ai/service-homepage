@@ -492,7 +492,7 @@ async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Respon
         _ => return (StatusCode::BAD_REQUEST, "unknown action").into_response(),
     };
     // Minimal sudoers entry allows exactly these two systemctl commands.
-    let mut child = match tokio::process::Command::new("sudo")
+    let child = match tokio::process::Command::new("sudo")
         .args(["-n", "systemctl", "start"])
         .arg(unit)
         .stdin(std::process::Stdio::null())
