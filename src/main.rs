@@ -531,6 +531,136 @@ async fn power(State(st): State<AppState>, Json(input): Json<PowerIn>) -> Respon
     }
 }
 
+/// Minimal HTTP GET for same-host favicon probing: plain HTTP only, 2s budget.
+async fn http_get_bytes(url: &str) -> Option<(Vec<u8>, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rest = url.strip_prefix("http://")?;
+    let hostport = rest.split('/').next().unwrap_or("");
+    let mut stream = tokio::net::TcpStream::connect(hostport).await.ok()?;
+    let path = if rest.len() > hostport.len() {
+        &rest[hostport.len()..]
+    } else {
+        "/"
+    };
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {hostport}\r\nUser-Agent: homepage-icon\r\nConnection: close\r\n\r\n"
+    );
+    let probe = async {
+        stream.write_all(req.as_bytes()).await.ok()?;
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.ok()?;
+        // Split headers/body tolerating both LF and CRLF.
+        let sep = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| (i, 4))
+            .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2)))?;
+        let head = String::from_utf8_lossy(&buf[..sep.0]).to_ascii_lowercase();
+        let status_ok = head.as_str().get(9..12) == Some("200");
+        if !status_ok {
+            return None;
+        }
+        let ctype = head
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("content-type:")
+                    .map(|v| v.trim().to_string())
+            })
+            .unwrap_or_else(|| "application/octet-stream".into());
+        Some((buf[sep.0 + sep.1..].to_vec(), ctype))
+    };
+    tokio::time::timeout(Duration::from_secs(2), probe)
+        .await
+        .ok()
+        .flatten()
+}
+
+fn b64(data: &[u8]) -> String {
+    // Tiny base64 (no external dep): standard alphabet with padding.
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18 & 63) as usize] as char);
+        out.push(T[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[derive(Serialize)]
+struct IconOut {
+    /// "data:image/...;base64,..." ready for <img src>, or None.
+    icon: Option<String>,
+}
+
+/// Best-effort favicon discovery for a local web service (magpie-style):
+/// parse <link rel*=icon> from the page, fall back to /favicon.ico.
+async fn icon_api(State(st): State<AppState>, AxPath(port): AxPath<u16>) -> Json<IconOut> {
+    let _ = &st;
+    let base = format!("http://127.0.0.1:{port}");
+    let mut href: Option<String> = None;
+    if let Some((body, _)) = http_get_bytes(&format!("{base}/")).await {
+        let text = String::from_utf8_lossy(&body).to_ascii_lowercase();
+        // crude scan: <link ... rel="...icon..." ... href="...">
+        for seg in text.match_indices("<link") {
+            let tail = &text[seg.0..text.len().min(seg.0 + 400)];
+            let Some(end) = tail.find('>') else { continue };
+            let tag = &tail[..end];
+            let rel_ok = tag
+                .split("rel=")
+                .nth(1)
+                .map(|r| {
+                    r.trim_start_matches(['"', '\'']).starts_with("icon")
+                        || r.trim_start_matches(['"', '\''])
+                            .starts_with("shortcut icon")
+                })
+                .unwrap_or(false);
+            if !rel_ok {
+                continue;
+            }
+            if let Some(h) = tag.split("href=").nth(1) {
+                let h = h.trim_start_matches(['"', '\'']);
+                let h = h.split(['"', '\'']).next().unwrap_or("");
+                href = Some(h.to_string());
+                break;
+            }
+        }
+    }
+    // Resolve relative hrefs; only http(s) targets make sense here.
+    let candidates: Vec<String> = match href {
+        Some(h) if h.starts_with("http://") => vec![h],
+        Some(h) if h.starts_with("https://") => vec![h],
+        Some(h) if h.starts_with('/') => vec![format!("{base}{h}")],
+        _ => vec![format!("{base}/favicon.ico"), format!("{base}/favicon.svg")],
+    };
+    for url in candidates {
+        if let Some((bytes, ctype)) = http_get_bytes(&url).await {
+            if !bytes.is_empty() && bytes.len() < 512 * 1024 && ctype.starts_with("image/") {
+                return Json(IconOut {
+                    icon: Some(format!("data:{ctype};base64,{}", b64(&bytes))),
+                });
+            }
+        }
+        // Fallbacks already enumerated; no further probing.
+    }
+    Json(IconOut { icon: None })
+}
+
 async fn page() -> Html<&'static str> {
     Html(include_str!("index.html"))
 }
@@ -612,6 +742,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/services", get(list).post(add))
         .route("/api/services/{id}", put(update).delete(remove))
         .route("/api/ports", get(ports))
+        .route("/api/icon/{port}", get(icon_api))
         .route("/api/power", post(power))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);

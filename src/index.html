@@ -33,6 +33,7 @@
   .dot.down { background: var(--danger); box-shadow: 0 0 6px rgba(255,120,117,.6); }
   .dot.unknown { background: var(--dim); }
   .icon { margin-right: 6px; }
+  .iconimg { width: 18px; height: 18px; object-fit: contain; vertical-align: -3px; border-radius: 4px; }
   .url { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); word-break: break-all; }
   .desc { color: var(--dim); font-size: 12px; margin-top: 8px; }
   .ops { position: absolute; top: 8px; right: 8px; display: none; gap: 4px; }
@@ -57,6 +58,7 @@
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog h2 { font-size: 16px; margin-bottom: 14px; }
   dialog label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  #fIcon { max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
   dialog input {
     width: 100%; background: var(--bg); border: 1px solid var(--edge); color: var(--ink);
     border-radius: 10px; padding: 9px 11px; font-size: 14px;
@@ -66,6 +68,8 @@
   .btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
   .btns button { border-radius: 10px; padding: 8px 16px; font-size: 13px; cursor: pointer; border: 1px solid var(--edge); background: var(--bg); color: var(--dim); }
   .btns .ok { background: var(--accent); border-color: var(--accent); color: #06282a; font-weight: 700; }
+  .iconrow { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .iconprev { width: 34px; height: 34px; border-radius: 9px; background: var(--bg); border: 1px solid var(--edge); object-fit: contain; display: none; }
   .palette { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .palette button {
     font-size: 18px; width: 36px; height: 36px; border-radius: 9px; cursor: pointer;
@@ -136,6 +140,11 @@
   <label>URL / 端口 *</label><input id="fUrl" placeholder="8080 或 5200/docs 或 http://…">
   <label class="portlabel">本机 Web 服务端口 <button type="button" id="refreshPorts" class="mini">刷新</button></label>
   <select id="portSel"><option value="">（加载中…）</option></select>
+  <div class="iconrow">
+    <img id="iconPrev" class="iconprev" alt="">
+    <button type="button" id="fetchIcon" class="mini">获取网站图标</button>
+    <span id="iconMsg" style="font-size:11px;color:var(--dim)"></span>
+  </div>
   <label>备注</label><input id="fDesc" placeholder="可选">
   <div class="btns">
     <button id="cancelBtn">取消</button>
@@ -179,7 +188,7 @@ function render() {
     const dotTitle = s.up === true ? '服务在线' : (s.up === false ? '探测失败，服务可能已停止' : '尚未探测');
     el.innerHTML = `
       <a class="main" href="${resolveUrl(s.url)}">
-        <div class="name"><span class="icon">${esc(s.icon) || '🔗'}</span>${esc(s.name)}<span class="dot ${dot}" title="${dotTitle}"></span></div>
+        <div class="name"><span class="icon">${s.icon && s.icon.startsWith('data:') ? `<img class="iconimg" src="${esc(s.icon)}" alt="">` : (esc(s.icon) || '🔗')}</span>${esc(s.name)}<span class="dot ${dot}" title="${dotTitle}"></span></div>
         <div class="url">${esc(s.url)}</div>
         ${s.desc ? `<div class="desc">${esc(s.desc)}</div>` : ''}
       </a>
@@ -204,6 +213,9 @@ function openDlg(svc) {
   editingId = svc ? svc.id : null;
   document.getElementById('dlgTitle').textContent = svc ? '编辑服务' : '添加服务';
   document.getElementById('fIcon').value = svc ? svc.icon : '';
+  iconPrev.style.display = svc && svc.icon && svc.icon.startsWith('data:') ? 'block' : 'none';
+  if (svc && svc.icon && svc.icon.startsWith('data:')) iconPrev.src = svc.icon;
+  iconMsg.textContent = '';
   document.getElementById('fName').value = svc ? svc.name : '';
   document.getElementById('fUrl').value = svc ? svc.url : '';
   document.getElementById('fDesc').value = svc ? svc.desc : '';
@@ -275,6 +287,31 @@ async function loadPorts() {
   });
 }
 portSel.onchange = () => { if (portSel.value) document.getElementById('fUrl').value = portSel.value; };
+
+// Grab favicon of the selected local service (magpie-style).
+const iconPrev = document.getElementById('iconPrev');
+const iconMsg = document.getElementById('iconMsg');
+async function grabIcon() {
+  iconMsg.textContent = '获取中…';
+  iconPrev.style.display = 'none';
+  const port = portSel.value || (document.getElementById('fUrl').value.match(/^(\d{1,5})(\/|$)/) || [])[1];
+  if (!port) { iconMsg.textContent = '先选择端口'; return; }
+  try {
+    const r = await fetch(`/api/icon/${port}`);
+    const d = await r.json();
+    if (d.icon) {
+      document.getElementById('fIcon').value = d.icon; // data URL stored in icon field
+      iconPrev.src = d.icon;
+      iconPrev.style.display = 'block';
+      iconMsg.textContent = '';
+      if (!document.getElementById('fName').value.trim()) {
+        const p = (await (await fetch('/api/ports')).json()).find(x => String(x.port) === String(port));
+        if (p && p.process) document.getElementById('fName').value = p.process;
+      }
+    } else { iconMsg.textContent = '未找到图标'; }
+  } catch { iconMsg.textContent = '获取失败'; }
+}
+document.getElementById('fetchIcon').onclick = grabIcon;
 document.getElementById('refreshPorts').onclick = loadPorts;
 
 // ---- power actions (in-page dialog: webview prompt() is unreliable) ----
