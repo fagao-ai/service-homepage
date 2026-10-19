@@ -643,6 +643,11 @@ async fn icon_api(State(st): State<AppState>, AxPath(port): AxPath<u16>) -> Json
     }
     // Resolve relative hrefs; only http(s) targets make sense here.
     let candidates: Vec<String> = match href {
+        Some(h) if h.starts_with("data:image/") => {
+            return Json(IconOut {
+                icon: Some(h.to_string()),
+            })
+        }
         Some(h) if h.starts_with("http://") => vec![h],
         Some(h) if h.starts_with("https://") => vec![h],
         Some(h) if h.starts_with('/') => vec![format!("{base}{h}")],
