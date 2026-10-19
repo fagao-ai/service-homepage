@@ -602,6 +602,35 @@ fn b64(data: &[u8]) -> String {
     out
 }
 
+/// Find the declared favicon href in lowercased HTML text. Char-based
+/// windowing so multibyte (CJK) pages cannot panic on slice boundaries.
+fn parse_icon_href(text: &str) -> Option<String> {
+    for seg in text.match_indices("<link") {
+        let tail: String = text[seg.0..].chars().take(400).collect();
+        let Some(end) = tail.find('>') else { continue };
+        let tag = &tail[..end];
+        let rel_ok = tag
+            .split("rel=")
+            .nth(1)
+            .map(|r| {
+                let r = r.trim_start_matches(['"', '\'']);
+                r.starts_with("icon") || r.starts_with("shortcut icon")
+            })
+            .unwrap_or(false);
+        if !rel_ok {
+            continue;
+        }
+        if let Some(h) = tag.split("href=").nth(1) {
+            let h = h.trim_start_matches(['"', '\'']);
+            let h = h.split(['"', '\'']).next().unwrap_or("");
+            if !h.is_empty() {
+                return Some(h.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Serialize)]
 struct IconOut {
     /// "data:image/...;base64,..." ready for <img src>, or None.
@@ -616,30 +645,7 @@ async fn icon_api(State(st): State<AppState>, AxPath(port): AxPath<u16>) -> Json
     let mut href: Option<String> = None;
     if let Some((body, _)) = http_get_bytes(&format!("{base}/")).await {
         let text = String::from_utf8_lossy(&body).to_ascii_lowercase();
-        // crude scan: <link ... rel="...icon..." ... href="...">
-        for seg in text.match_indices("<link") {
-            let tail = &text[seg.0..text.len().min(seg.0 + 400)];
-            let Some(end) = tail.find('>') else { continue };
-            let tag = &tail[..end];
-            let rel_ok = tag
-                .split("rel=")
-                .nth(1)
-                .map(|r| {
-                    r.trim_start_matches(['"', '\'']).starts_with("icon")
-                        || r.trim_start_matches(['"', '\''])
-                            .starts_with("shortcut icon")
-                })
-                .unwrap_or(false);
-            if !rel_ok {
-                continue;
-            }
-            if let Some(h) = tag.split("href=").nth(1) {
-                let h = h.trim_start_matches(['"', '\'']);
-                let h = h.split(['"', '\'']).next().unwrap_or("");
-                href = Some(h.to_string());
-                break;
-            }
-        }
+        href = parse_icon_href(&text);
     }
     // Resolve relative hrefs; only http(s) targets make sense here.
     let candidates: Vec<String> = match href {
@@ -792,6 +798,21 @@ LISTEN 0 4096 [::]:22 [::]:* users((\"sshd\",pid=1,fd=3))\n";
         assert_eq!(service_port("http://host:9000/x"), Some(9000));
         assert_eq!(service_port("https://example.com"), None);
         assert_eq!(service_port("/local-path"), None);
+    }
+
+    #[test]
+    fn parse_icon_href_extracts_and_survives_multibyte() {
+        let html = "<html><link rel=\"icon\" href=\"/assets/fav-dx123.ico\"/>放".to_lowercase();
+        assert_eq!(
+            parse_icon_href(&html).as_deref(),
+            Some("/assets/fav-dx123.ico")
+        );
+        // CJK right at the old byte-window boundary must not panic.
+        let mut page = "<link rel=\"icon\" href=\"/f.ico\"/>".to_string();
+        page.push_str(&"放".repeat(300));
+        assert_eq!(parse_icon_href(&page).as_deref(), Some("/f.ico"));
+        // no icon declaration
+        assert_eq!(parse_icon_href("<html><body>hi</body></html>"), None);
     }
 
     #[test]
