@@ -11,8 +11,11 @@ Environment=HOME_ADDR=127.0.0.1:8090
 Environment=HOME_DATA=/var/lib/homepage/services.json
 Restart=always
 RestartSec=3
-User=dev
-Group=dev
+# Deployment template: replace CHANGE_ME with the runtime user, e.g.
+#   sed -i "s/CHANGE_ME/$USER/g" /etc/systemd/system/homepage.service
+# Requires /etc/homepage.env (HOME_USER, HOME_PASSWORD), mode 600, root-owned.
+User=CHANGE_ME
+Group=CHANGE_ME
 # NOTE: NoNewPrivileges must stay off here: it would block the
 # setuid sudo used by /api/power (scoped by /etc/sudoers.d/homepage-power).
 PrivateTmp=true
