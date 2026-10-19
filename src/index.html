@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>home-host 服务导航</title>
+<title>服务导航</title>
 <style>
   :root {
     --bg: #0b0f14; --card: #121821; --edge: #1e2a38;
@@ -98,7 +98,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>home<b>·</b>gpu 服务导航</h1>
+    <h1>服务<b>·</b>导航</h1>
     <button class="edit-toggle" id="editToggle">编辑</button>
   </header>
   <p class="sub">点卡片直达 · 手机上点“编辑”可增删服务</p>
@@ -285,7 +285,7 @@ let pwAction = null, pwLabel = '';
 
 function openPwDlg(action, label) {
   pwAction = action; pwLabel = label;
-  document.getElementById('pwTitle').textContent = `确认${label} home-host？`;
+  document.getElementById('pwTitle').textContent = `确认${label}本机？`;
   pwInput.value = ''; pwMsg.textContent = '';
   pwDlg.showModal();
   setTimeout(() => pwInput.focus(), 50);
